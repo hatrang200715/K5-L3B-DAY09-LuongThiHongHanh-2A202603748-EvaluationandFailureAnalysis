@@ -53,6 +53,32 @@ def test_integrity_flags_nan_and_dropped_rows():
     assert gate.integrity_check(dropped, base, SPEC)
 
 
+def test_check_blocks_missing_manifest_without_crashing():
+    from lab9 import gate
+
+    base = _report(copy.deepcopy(ROWS), {"pass_rate": 1.0})
+    pr = copy.deepcopy(base)
+    del pr["manifest"]
+    blocked, lines = gate.check(pr, base, SPEC)
+    assert blocked == ["integrity"]
+    assert any("manifest" in line for line in lines)
+
+
+def test_integrity_flags_missing_grader_values_and_relabelled_slices():
+    from lab9 import gate
+
+    base = _report(copy.deepcopy(ROWS), {"pass_rate": 1.0})
+    missing = copy.deepcopy(base)
+    missing["rows"][0]["pass_rate"] = None
+    assert any("missing_row_metric:pass_rate" in p
+               for p in gate.integrity_check(missing, base, SPEC))
+
+    relabelled = copy.deepcopy(base)
+    relabelled["rows"][0]["slices"] = []
+    assert any("slice_tags_changed:E-000" in p
+               for p in gate.integrity_check(relabelled, base, SPEC))
+
+
 def test_integrity_flags_loosened_spec():
     from lab9 import gate
 
@@ -61,6 +87,29 @@ def test_integrity_flags_loosened_spec():
     loose["metrics"][0]["threshold"]["min"] = 0.5
     assert gate.integrity_check(base, base, loose, SPEC)
     assert gate.integrity_check(base, base, SPEC, SPEC) == []
+
+
+def test_integrity_ratchets_metrics_and_slices():
+    from lab9 import gate
+
+    base_spec = copy.deepcopy(SPEC)
+    base_spec["metrics"][0]["threshold"]["no_significant_drop"] = True
+    base_spec["slices"] = [
+        {"name": "denial", "metric": "pass_rate", "min": 0.9,
+         "no_significant_drop": True, "blocking": True}
+    ]
+    loose_spec = copy.deepcopy(base_spec)
+    loose_spec["metrics"].pop()
+    loose_spec["slices"][0]["min"] = 0.8
+    loose_spec["slices"][0].pop("no_significant_drop")
+    loose_spec["slices"][0]["blocking"] = False
+
+    report = _report(copy.deepcopy(ROWS), {"pass_rate": 1.0})
+    problems = gate.integrity_check(report, report, loose_spec, base_spec)
+    assert any("metrics_removed:pass_rate" in p for p in problems)
+    assert any("slices_threshold_loosened:denial/min" in p for p in problems)
+    assert any("slices_no_significant_drop_removed:denial" in p for p in problems)
+    assert any("slices_blocking_removed:denial" in p for p in problems)
 
 
 def test_slice_check_blocks_a_slice_below_floor():
@@ -74,3 +123,23 @@ def test_slice_check_blocks_a_slice_below_floor():
     spec = dict(SPEC, slices=[{"name": "denial", "metric": "pass_rate", "min": 0.9, "blocking": True}])
     blocked, _ = gate.slice_check(_report(rows, {"pass_rate": 0.75}), base, spec)
     assert blocked == ["slice:denial/pass_rate"]
+
+
+def test_slice_check_blocks_significant_drop_even_above_floor():
+    from lab9 import gate
+
+    base_rows = copy.deepcopy(ROWS)
+    pr_rows = copy.deepcopy(ROWS)
+    for row in pr_rows:
+        if "denial" in row["slices"]:
+            row["pass_rate"] = 0.5
+    base = _report(base_rows, {"pass_rate": 1.0})
+    pr = _report(pr_rows, {"pass_rate": 0.75})
+    spec = dict(SPEC, slices=[
+        {"name": "denial", "metric": "pass_rate", "min": 0.4,
+         "no_significant_drop": True, "blocking": True}
+    ])
+
+    blocked, lines = gate.slice_check(pr, base, spec)
+    assert blocked == ["slice:denial/pass_rate"]
+    assert "significant drop" in lines[0]
